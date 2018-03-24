@@ -1,0 +1,204 @@
+#include <stdio.h>
+#include <stdlib.h>
+/* vc7 floating point paranoia.  This program is in serious violation. */
+#ifdef _WIN32
+#pragma warning(disable:4244)
+#endif
+extern unsigned int debug_vout;
+static unsigned int myglobalnum=16;
+const unsigned int MAX_VOUT_STREAMS=31;//if you change this, change one 5 lines
+int finiteValueProduced (float input<>);
+float shiftValues(float list_stream<>,
+                  float (*output_stream)<>,
+                  int WIDTH, 
+                  int LENGTH, 
+                  int sign);
+unsigned int  voutCombine(float outleft_stream<>,
+                          float maxshiftleft,
+                          unsigned int LEFTWIDTH,
+                          float outright_stream<>,
+                          float maxshiftright,
+                          unsigned int RIGHTWIDTH,
+                          unsigned int LENGTH,
+                          float (*output)<> );
+unsigned int totalCombineVout (float list_stream<>, 
+                               unsigned int WIDTH,
+                               float list2_stream<>,
+                               unsigned int WIDTH2,
+                               unsigned int LENGTH,
+                               float (*output)<>);
+void combineStreams (float (*streams)<>,
+                     unsigned int num,
+                     unsigned int width, 
+                     unsigned int length,
+                     float  (*output)<>);
+float myrand (unsigned int *seed) {
+   unsigned int rand_max =1509281;
+   *seed = (*seed +26129327)%rand_max;
+   if (*seed<(rand_max/5)*2)
+      return .5;
+   else if (*seed<rand_max/2)
+      return 1;
+   else if (*seed<(rand_max/4)*3)
+      return 1.0/floor((float)*seed/(float)rand_max);
+   else if (*seed<(rand_max/11)*10)
+      return .25;
+   else
+      return 4;
+}
+#define STREAMALLOC(num) (brook::stream*)malloc(num*sizeof(brook::stream))
+#define STREAMHOLDERSIZE brook::stream
+void combineStreamsTest(float (*streams)<>) {
+   
+      unsigned int mylength=3; unsigned int i=0,mywidth=7;
+      unsigned int mynum=myglobalnum;
+      //      float output<(mywidth*mynum),mylength>;
+      float output<1,1>;
+      float a<mywidth,mylength>;
+      float b<mywidth,mylength>;
+      float c<mywidth,mylength>;
+      float d<mywidth,mylength>;
+      float e<mywidth,mylength>;
+      float f<mywidth,mylength>;
+      float g<mywidth,mylength>;
+      float h<mywidth,mylength>;
+      float a1<mywidth,mylength>;
+      float b1<mywidth,mylength>;
+      float c1<mywidth,mylength>;
+      float d1<mywidth,mylength>;
+      float e1<mywidth,mylength>;
+      float f1<mywidth,mylength>;
+      float g1<mywidth,mylength>;
+      float h1<mywidth,mylength>;
+      float * list;
+      float * lust;
+      list = (float *)malloc(sizeof(float)*mywidth*mylength*8);
+      lust = (float *)malloc(sizeof(float)*mywidth*mylength*8);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i;
+         lust[i]=-list[i];
+      }
+      streamRead(a,list);
+      streamRead(a1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*2;         lust[i]=-list[i];
+      }
+      streamRead(b,list);
+      streamRead(b1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*3;         lust[i]=-list[i];
+      }
+      streamRead(c,list);
+      streamRead(c1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*4;         lust[i]=-list[i];
+      }
+      streamRead(d,list);
+      streamRead(d1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*5;         lust[i]=-list[i];
+      }
+      streamRead(e,list);
+      streamRead(e1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*6;         lust[i]=-list[i];
+      }
+      streamRead(f,list);
+      streamRead(f1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*7;         lust[i]=-list[i];
+      }
+      streamRead(g,list);
+      streamRead(g1,lust);
+      for (i=0;i<mylength*mywidth;++i) {
+         list[i]=i*8;         lust[i]=-list[i];
+      }
+      streamRead(h,list);
+      streamRead(h1,lust);
+      if (1) {
+         streams = STREAMALLOC(25);
+         memcpy(streams,&a,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+1,&b,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+2,&c,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+3,&d,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+4,&e,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+5,&f,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+6,&g,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+7,&h,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+8,&a1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+9,&b1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+10,&c1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+11,&d1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+12,&e1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+13,&f1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+14,&g1,sizeof(STREAMHOLDERSIZE));
+         memcpy(streams+15,&h1,sizeof(STREAMHOLDERSIZE));
+         combineStreams(streams,
+                        mynum,
+                        mywidth,
+                        mylength,                        
+                        &output);
+         free(streams);
+      }
+      streamPrint(output,1);
+      printf("\n");
+}
+#define WIDTH 16
+#define WIDTH2 17
+#define LENGTH 2
+int main (int argc,char ** argv) {
+   unsigned int i;
+   unsigned int seed;
+   float maxshiftleft=0,maxshiftright=0;
+   float list_stream <WIDTH,LENGTH>;
+   float list2_stream<WIDTH2,LENGTH>;
+   float outleft_stream<WIDTH,LENGTH>;
+   float outright_stream<WIDTH2,LENGTH>;
+   float output_stream <1,1>;
+   float list[WIDTH*LENGTH+WIDTH2*LENGTH];
+   seed =((unsigned int)2147483647)*2+1;
+   if (argc>1) {
+      unsigned int num=atoi(argv[1]);
+      if (num<=0)
+         debug_vout=1;
+      else
+         myglobalnum=num;
+      if (argc>1)
+         debug_vout=1;
+   }
+   for (i=0;i<LENGTH*WIDTH;i++) {
+      list[i]=(float)(myrand(&seed));
+   }
+   streamRead(list_stream,list);
+   printf ("First Stream\n");
+   streamPrint(list_stream,1);
+   for (i=0;i<LENGTH*WIDTH2;i++) {
+      list[i]=i+(float)(myrand(&seed));
+      if (i%5==0)
+         list[i]=1/floor(.5);
+   }   
+   streamRead(list2_stream,list);
+   if (debug_vout)
+      printf("\nFINITE %g %g\n",(double)finiteValueProduced(list_stream),
+             (double)finiteValueProduced(list2_stream));
+   printf ("\n\nSecond Stream\n");
+   streamPrint(list2_stream,1);
+   printf ("\n\n");
+   totalCombineVout(list_stream,WIDTH,
+                    list2_stream,WIDTH2,LENGTH,&output_stream);
+   printf("Cool\n");
+   streamPrint(output_stream,1);
+   printf("\n\n");
+   maxshiftleft = shiftValues(list_stream,&outleft_stream,WIDTH,LENGTH,-1);
+   maxshiftright=shiftValues(list2_stream,&outright_stream,WIDTH2,LENGTH,-1);
+   voutCombine(outleft_stream,maxshiftleft,WIDTH,
+               outright_stream,maxshiftright,WIDTH2,
+               LENGTH,&output_stream);
+   printf ("\nOutput\n");
+   streamPrint(output_stream,1);
+   printf ("\n\n");
+   combineStreamsTest(0);
+   
+   return 0;
+}
+

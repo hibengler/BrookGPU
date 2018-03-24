@@ -1,0 +1,66 @@
+/*
+ * Iterator.br --
+ *
+ *      Simple demo / regression test for iterator pseudo-streams.
+ */
+
+#include <stdio.h>
+void __kprintf_cpu_inner(float f) {
+   fprintf(stderr,"%f | ",f);
+}
+
+kernel void
+iterator_test (float2 d<>, iter float2 iterator<>, out float2 e<>)
+{
+   e = iterator + d;
+}
+
+reduce void 
+fetch (float2 a<>, reduce float2 b<>) {
+  b = a;
+}
+
+int
+main (int argc, char *argv[]) {
+   iter float2 ian<20, 10> = iter(float2(0.0f, 0.0f), float2(200.0f, 100.0f));
+   iter float2 indexstream<20, 10> =
+      iter(float2(9.0f, 19.0f), float2(-1.0f, -1.0f));
+   iter float tim<10> = iter(0.0f, 200.0f);
+   float2 d<20, 10>;
+   float2 e<20, 10>;
+
+   float2 data_d[20][10];
+   float2 data_e[20][10];
+   int i,j;
+
+   for (i=0; i<20; i++) {
+      for (j=0; j<10; j++) {
+         data_d[i][j].x = (float)i;
+         data_d[i][j].y = (float)j;
+      }
+   }
+
+   streamRead(d, data_d);
+   streamGatherOp(e,indexstream,d,fetch);
+   streamWrite(e, data_e);
+
+   printf("gatherOp test:\n");
+   for (i=0; i<20; i++) {
+      for (j=0; j<10; j++) {
+         printf("{%3.2f,%3.2f} ", data_e[i][j].x,data_e[i][j].y);
+      }
+      printf("\n");
+   }
+
+   iterator_test(d,ian,e);
+   streamWrite(e, data_e);
+
+   printf("iterator test:\n");
+   for (i=0; i<20; i++) {
+      for (j=0; j<10; j++) {
+         printf("{%3.2f,%3.2f} ", data_e[i][j].x,data_e[i][j].y);
+      }
+      printf("\n");
+   }
+   return 0;
+}

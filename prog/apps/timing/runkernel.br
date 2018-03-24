@@ -1,0 +1,691 @@
+/*
+ * runkernel.br
+ *
+ *      Simple tests to time how long it takes to invoke various kernels
+ *      (i.e. ratio of execution time to stream length).
+ */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
+
+#include "main.h"
+#include "runkernel.h"
+#include "statrecord.h"
+
+#if 1
+#define CHECK_MISMATCH 1
+#else
+#define CHECK_MISMATCH 0
+#endif
+
+#define MAX_TRIES       100
+#define SMOOTHING       100
+#define BIG_LENGTH      512
+
+/*
+ * Streams can't be passed to functions, so use a macro.
+ *
+ *      We run our kernel and based on the knowledge that input[1] is 1.0
+ *      and that the calculation produces n*input, there end up being n - 1
+ *      instructions (cgc, fxc, and cl are all smart enough to merge the
+ *      assingment with the first math op).
+ */
+
+#define UPDATE_CUR_OPS(numEntries, data, k, s, o)               \
+   do {                                                         \
+      int newOps;                                               \
+      float4 *scratch;                                          \
+                                                                \
+      curNEntries = numEntries;                                 \
+      scratch = (float4 *) malloc(numEntries * sizeof *scratch);\
+      streamRead(s, data);                                      \
+      k(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);                  \
+      streamWrite(o, scratch);                                  \
+      newOps = numEntries > 1 ? (int) (scratch[1].x  - 1) : 38; \
+      if (newOps > 10) curOps = newOps;                         \
+      else printf("(* Length %d computed bogus Ops %d *)\n", numEntries, newOps); \
+      free(scratch);                                            \
+   } while (0)
+
+typedef void (*RunKernelWrapperFn)(char *logName, int length, int nRuns);
+
+static const int lengths[] = {
+   2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+   21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+   40, 41, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+   59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
+   77, 78, 79, 80, 90, 96, 100, 120, 140, 160, 180, 200, 220, 240,
+   256, 300, 350, 400, 450, 512, 550, 600, 650, 700, 750, 800, 850, 900,
+   950, 1024, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2048
+};
+static const int iterations[] = {
+   1, 2, 4, 8, 16, /*20,  40, 50, 75, 150,*/ 1000, /* 200, 300, 500 */
+};
+static const int numLengths = sizeof lengths / sizeof lengths[0];
+static const int numIterations = sizeof iterations / sizeof iterations[0];
+
+/*
+ * Latched values (each time we see a request for to run a kernel on a
+ * stream with different from curNEntries, we calculate R: the length of
+ * time it takes to do a streamRead() on a stream of the new length).
+ */
+
+static int curNEntries;
+static int curOps = 0;
+static float cur_R, cur_W;
+
+/*
+ * RunKernelMemcpyKernel --
+ *
+ *      Just copy.  This kernel is separate from the test kernels just so
+ *      nothing related to it gets cached.  It exists only for priming the
+ *      BRT so we can ignore cold start timing.
+ */
+
+kernel void
+RunKernelMemcpyKernel(float s<>, out float o<>)
+{
+   o = s;
+}
+
+
+/*
+ * RunKernelHardWork --
+ *
+ *      Try for a kernel that will actually exercise the GPU
+ */
+
+kernel void
+RunKernelHardWork(float4 c, float4 s<>, out float4 o<>)
+{
+   o = c*s + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; /*o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s; o = c*o + s;
+   o = c*o + s; o = c*o + s; o = c*o + s;
+   */
+}
+
+
+/*
+ * RunKernelHardWorkCPU --
+ *
+ *      Simple C code to mimic the HardWork kernel.  Makes a plausible
+ *      baseline for a naive native implementation.
+ */
+
+#define I(o, _c, s)     o = o + s
+#define DO_MADs(o, _c, s) \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); /*I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   I(o, _c, s); I(o, _c, s); I(o, _c, s); \
+   */
+
+/* static (Leave extern so it's easy to find in with dumpbin) */ void
+RunKernelHardWorkCPU(int streamLength, float4 c, float4 *input, float4 *output)
+{
+   int i;
+   float ox, oy, oz, ow;
+
+   for (i = 0; i < streamLength * streamLength; i++) {
+      ox = input[i].x;
+      DO_MADs(ox, c.x, input[i].x);
+      output[i].x = ox;
+
+      oy = input[i].y;
+      DO_MADs(oy, c.y, input[i].y);
+      output[i].y = oy;
+
+      oz = input[i].z;
+      DO_MADs(oz, c.z, input[i].z);
+      output[i].z = oz;
+
+      ow = input[i].w;
+      DO_MADs(ow, c.w, input[i].w);
+      output[i].w = ow;
+
+   }
+}
+
+
+/*
+ * RunKernelKickBRT --
+ *
+ *      Running the first kernel is very slow because a lot of one time
+ *      initialization happens in BRT itself.  We use the same kernel as the
+ *      tests to ignore the one-time overhead of downloading the kernel to
+ *      the GPU.
+ */
+
+static void
+RunKernelKickBRT(void)
+{
+   float4 d[1] = { float4(12.34f, 12.34f, 12.34f, 12.34f) };
+   float4 s<1>, o<1>;
+
+   streamRead(s, d);
+   RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+   streamWrite(o, d);
+}
+
+
+/*
+ * RunKernelBuildSummary --
+ *
+ *      Generates a bunch of summary timing numbers
+ */
+
+static void
+RunKernelBuildSummary(int length, int verbose, int fast)
+{
+   struct StatRecord kW, W, RkW, R100kW;
+   float4 s<length, length>, o<length, length>, tiny<1, 1>;
+   float4 *outData;
+   float timeR, timeK;
+   int j, i, n;
+
+   outData = (float4 *) malloc(length * length * sizeof *outData);
+
+   StatRecord_Clear(&kW);
+   for (i = 0; i < SMOOTHING; i++) {
+      t1 = GetTimeTSC();
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+      streamWrite(o, outData);
+      StatRecord_Record(&kW, GetTimeTSC() - t1);
+   }
+   if (verbose) StatRecord_Print(&kW, "kW");
+
+   StatRecord_Clear(&RkW);
+   for (i = 0; i < SMOOTHING; i++) {
+      t1 = GetTimeTSC();
+      streamRead(s, outData);
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+      streamWrite(o, outData);
+      StatRecord_Record(&RkW, GetTimeTSC() - t1);
+   }
+   if (verbose) StatRecord_Print(&RkW, "RkW");
+
+   StatRecord_Clear(&W);
+   for (i = 0; i < SMOOTHING; i++) {
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, tiny);
+      streamWrite(tiny, outData);
+      t1 = GetTimeTSC();
+      streamWrite(o, outData);
+      StatRecord_Record(&W, GetTimeTSC() - t1);
+   }
+   if (verbose) StatRecord_Print(&W, "W");
+
+   StatRecord_Clear(&R100kW);
+   n = fast ? 1 : 10;
+   for (i = 0; i < n; i++) {
+      t1 = GetTimeTSC();
+      streamRead(s, outData);
+      for (j = 0; j < SMOOTHING; j++) {
+         RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+      }
+      streamWrite(o, outData);
+      StatRecord_Record(&R100kW, GetTimeTSC() - t1);
+   }
+   if (verbose) StatRecord_Print(&R100kW, "R100kW");
+   free(outData);
+
+   timeR = (RkW.total - kW.total) / SMOOTHING;
+   timeK = R100kW.total / R100kW.n / SMOOTHING;
+   if (verbose) {
+      printf("(* Summary: R: %5.2f, k: %5.2f, W %5.2f (timed) / %5.2f (computed) *)\n",
+             timeR, timeK, W.total / W.n, RkW.total / RkW.n - timeR - timeK);
+   }
+
+   cur_R = timeR;
+   cur_W = W.total / W.n;
+}
+
+
+/*
+ * RunKernelBuildData --
+ *
+ *      Helper function that allocates memory and fills it with the stream
+ *      test pattern.
+ */
+
+static void
+RunKernelBuildData(float4 **data, int numEntries)
+{
+   int i;
+
+   *data = (float4 *) malloc(numEntries * sizeof **data);
+   assert(*data);
+
+   for (i = 0; i < numEntries; i++) {
+      (*data)[i].x = (*data)[i].y = (*data)[i].z = (*data)[i].w = (float) i;
+   }
+}
+
+
+/*
+ * RunKernelProcessTiming --
+ *
+ *      Interpret the numbers, calculate FLOPS, and check to make certain
+ *      the output is the expected transformation on the input.
+ *
+ *      NOTE: stop and start are tunnelled in as globals for the same ease
+ *      of implementation issue as the fact that they're declared in main.h
+ *      instead of here.
+ */
+
+static void
+RunKernelProcessTiming(char *name, float4 *data,
+                       int length, int numEntries, int nRuns)
+{
+   float elapsed, numFLOPs;
+   int i;
+
+   elapsed = (float) CyclesToUsecs(stop - start);
+   numFLOPs = numEntries * nRuns * 4.0f * curOps;
+
+   /*
+    * 'MFLOPS' calculation:
+    *   - numEntries * nRuns entries processed total
+    *   - calculations took elapsed usecs = elapsed/10^6 secs
+    *   - curOps instructions
+    *   - 4 floats per entry
+    */
+   printf64(CyclesToUsecs(stop - start));
+   printf(" %8.2f   %8.0f   %4d\t(* %s %d R%d %d %5.2f %5.2f *)\n",
+          numFLOPs / elapsed, numFLOPs / 1000000,
+          nRuns, name, length, nRuns, curOps, cur_R, cur_W);
+
+   for (i = 0; CHECK_MISMATCH && curOps > 0.0f && i < numEntries; i++) {
+      float expected;
+      float cur = data[i].x;
+
+      /*
+       * Grr.  Tolerate precision errors so long as the result isn't
+       * wrong by more than 10%.  Since you start to see skipping around
+       * 2^24 on nv30 and around 2^17 on ATI, once we're dealing with
+       * reasonable scales and 1024x1024 streams, there are precision
+       * artifacts.  Sad.  --Jeremy.
+       */
+
+      expected = (float) curOps * i;
+      if ((cur != expected &&
+           (cur - expected > 0.1f * expected || expected - cur > 0.1f * cur)) ||
+          data[i].y != cur || data[i].z != cur || data[i].w != cur) {
+         printf("(* Mismatch %d,%d/%d: *)\n"
+                "(* Expected %.2f, Got: %.2f %.2f %.2f %.2f *)\n",
+                 i / length, i % length, length, expected,
+                 data[i].x, data[i].y, data[i].z, data[i].w);
+         return;
+      }
+   }
+}
+
+
+/*
+ * RunKernel1D --
+ *
+ *      Runs a simple kernel on a 1D stream and times it.
+ */
+
+static void
+RunKernel1D(char *logName, int streamLength, int nRuns)
+{
+   float4 s<streamLength>, o<streamLength>;
+   float4 *data;
+   int i;
+
+   RunKernelBuildData(&data, streamLength);
+
+   if (curNEntries != streamLength) {
+      UPDATE_CUR_OPS(streamLength, data, RunKernelHardWork, s, o);
+   }
+
+   start = GetTimeTSC();
+   streamRead(s, data);
+   for (i = 0; i < nRuns; i++) {
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+   }
+   streamWrite(o, data);
+   stop = GetTimeTSC();
+
+   RunKernelProcessTiming(logName, data, streamLength, streamLength, nRuns);
+   free(data);
+}
+
+
+/*
+ * RunKernel2D --
+ *
+ *      Runs a simple kernel on a 2D stream and times it.
+ */
+
+static void
+RunKernel2D(char *logName, int streamLength, int nRuns)
+{
+   float4 s<streamLength, streamLength>, o<streamLength, streamLength>;
+   float4 *data, *data2;
+   int i;
+
+   RunKernelBuildData(&data, streamLength * streamLength);
+   RunKernelBuildData(&data2, streamLength * streamLength);
+
+   if (curNEntries != streamLength * streamLength) {
+      RunKernelBuildSummary(streamLength, 0, 0);
+      UPDATE_CUR_OPS(streamLength * streamLength, data, RunKernelHardWork, s, o);
+   }
+
+   start = GetTimeTSC();
+   streamRead(s, data);
+   for (i = 0; i < nRuns; i++) {
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+   }
+   streamWrite(o, data);
+   stop = GetTimeTSC();
+
+   RunKernelProcessTiming(logName, data,
+                          streamLength, streamLength * streamLength, nRuns);
+
+   free(data);
+}
+
+
+/*
+ * RunKernelDoRun --
+ *
+ *      More code factoring.  A convenient function for regularizing the
+ *      output of a run with a given length to avoiding copy-pasting.
+ */
+
+static void
+RunKernelDoRun(RunKernelWrapperFn f, char *logName, int length)
+{
+   int i;
+
+   printf("(* %s: length %d *)\n", logName, length);
+   printf("(* usecs   MFLOPS   # MFLOPs   runs *)\n");
+   for (i = 0; i < numIterations; i++) {
+      f(logName, length, iterations[i]);
+   }
+   printf("\n");
+}
+
+
+/*
+ * RunKernel1D_Time --
+ *
+ *      Entry point for the 1D kernel overhead tests.
+ */
+
+void
+RunKernel1D_Time(int maxLength)
+{
+   int i;
+
+   RunKernelKickBRT();
+
+   for (i = 0; i < numLengths && lengths[i] < maxLength; i++) {
+      RunKernelDoRun(RunKernel1D, "RunK1D", lengths[i]);
+   }
+   RunKernelDoRun(RunKernel1D, "RunK1D", maxLength);
+}
+
+
+/*
+ * RunKernel2D_Time --
+ *
+ *      Entry point for the 2D kernel overhead tests.
+ */
+
+void
+RunKernel2D_Time(int maxLength)
+{
+   int i;
+
+   RunKernelKickBRT();
+
+   for (i = 0; i < numLengths && lengths[i] < maxLength; i++) {
+      RunKernelDoRun(RunKernel2D, "RunK2D", lengths[i]);
+   }
+   RunKernelDoRun(RunKernel2D, "RunK2D", maxLength);
+}
+
+
+/*
+ * RunKernelFindIdealGPUvsCPUSlope --
+ *
+ *      At peak, we expect the GPU / CPU crossover point to be linear as a
+ *      function of the streamLength.  Specifically, we expect the CPU time
+ *      to be:
+ *
+ *      T_cpu = len * (# iterations of k) * k_cpu
+ *
+ *      where k_cpu is time to execute the CPU implementation of the kernel.
+ *      The GPU cost should be
+ *
+ *      T_gpu = (R+W)*len + len * (# iterations of k) * k_gpu
+ *
+ *      where R, W are the R and W write bandwidth in streamElements / time.
+ *
+ *      Solving, we get T_gpu < T_cpu when
+ *
+ *              len * (# iterations) * (ops in k) >
+ *                      len * (R + W) * (ops in k) / (k_cpu - k_gpu)
+ *
+ *      which is just
+ *
+ *              # ops > [(R + W) * (ops in k) / (k_cpu - k_gpu)] * len
+ *
+ *      So we need to find k_gpu, k_cpu, and (R+W).
+ *
+ */
+
+static float
+RunKernelFindIdealGPUvsCPUSlope(void)
+{
+   float4 s<BIG_LENGTH, BIG_LENGTH>, o<BIG_LENGTH, BIG_LENGTH>;
+   float4 tiny<1>;
+   float4 *data, *outData;
+   float slope = 0.0f, cMFLOPS, gMFLOPS, readRate, writeRate;
+   int cpuOps, i;
+
+   RunKernelBuildData(&data, BIG_LENGTH * BIG_LENGTH);
+   outData = (float4 *) malloc(BIG_LENGTH * BIG_LENGTH * sizeof *outData);
+
+   RunKernelBuildSummary(BIG_LENGTH, 1, 1);
+
+   RunKernelHardWorkCPU(BIG_LENGTH,
+                        float4(1.0f, 1.0f, 1.0f, 1.0f), data, outData);
+   t1 = GetTimeTSC();
+   for (i = 0; i < SMOOTHING; i++) {
+      RunKernelHardWorkCPU(BIG_LENGTH,
+                           float4(1.0f, 1.0f, 1.0f, 1.0f), data, outData);
+   }
+   t1 = CyclesToUsecs(GetTimeTSC() - t1) / SMOOTHING;
+   cpuOps = (int) outData[1].x - 1;
+   cMFLOPS = (BIG_LENGTH * BIG_LENGTH * 4 * ((float) cpuOps) / t1);
+
+   t2 = GetTimeTSC();
+   streamRead(s, data);
+   for (i = 0; i < SMOOTHING; i++) {
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+   }
+   streamWrite(o, data);
+   t2 = CyclesToUsecs(GetTimeTSC() - t2) / SMOOTHING;
+   gMFLOPS = (BIG_LENGTH * BIG_LENGTH * 4 * (data[1].x - 1) / t2);
+
+   if (t2 > t1) {
+     printf("(* The CPU is _faster_ than the GPU by");
+     printf64(t2-t1);
+     printf(" usecs! *)\n");
+   }
+
+   if (((int) data[1].x - 1) != cpuOps) {
+      printf("(* CPU is doing %4.1f ops and GPU is doing %4.1f! *)\n",
+             (float) cpuOps, (float) (data[1].x - 1));
+   }
+
+   readRate = sizeof(float) * 4 * BIG_LENGTH * BIG_LENGTH / cur_R;
+   writeRate = sizeof(float) * 4 * BIG_LENGTH * BIG_LENGTH / cur_W;
+   printf("(* Read: %5.2f MB/s, Write: %5.2f MB/s, CPU MFLOPS: %4.f GPU MFLOPS: %4.f\n",
+         readRate, writeRate, cMFLOPS, gMFLOPS);
+
+
+   slope = (cur_R + cur_W) * cpuOps / (float) (t1 - t2);
+   printf("(* Ideal slope: %5.2f Ideal iterations: %4.2f (%d ops)\tRunKVSIdeal *)\n",
+          slope, slope / (float) cpuOps, cpuOps);
+
+   free(data);
+   free(outData);
+   return slope;
+}
+
+
+/*
+ * RunKernelFindGPUvsCPUOne --
+ *
+ *      Finds the crossover point i at which
+ *
+ *              Read(N) + i*(GPU Version(N)) + Write(N) < i*(CPU Version(N))
+ *
+ *      Essentially, the plot is N floats vs. i*N*(# ops in the kernel) and
+ *      this function finds i given N and and a kernel length.
+ *
+ */
+
+static int
+RunKernelFindGPUvsCPUOne(int length)
+{
+   float4 s<length, length>, o<length, length>;
+   float4 *data, *outCPU, *outGPU;
+   int i;
+
+   if (length <= 1) return -1; /* We're never going to catch the CPU... */
+
+   RunKernelBuildData(&data, length * length);
+   outCPU = (float4 *) malloc(length * length * sizeof *outCPU);
+   outGPU = (float4 *) malloc(length * length * sizeof *outGPU);
+
+   for (i = 1; i < MAX_TRIES; i++) {
+      int j, k;
+
+      RunKernelHardWorkCPU(length,
+                           float4(1.0f, 1.0f, 1.0f, 1.0f), data, outCPU);
+      t1 = GetTimeTSC();
+      for (k = 0; k < SMOOTHING; k++) {
+         for (j = 0; j < i; j++) {
+            RunKernelHardWorkCPU(length,
+                                 float4(1.0f, 1.0f, 1.0f, 1.0f), data, outCPU);
+         }
+      }
+      t1 = CyclesToUsecs(GetTimeTSC() - t1);
+
+      streamRead(s, data);
+      RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+      streamWrite(o, outGPU);
+
+      t2 = GetTimeTSC();
+      for (k = 0; k < SMOOTHING; k++) {
+         streamRead(s, data);
+         for (j = 0; j < i; j++) {
+            RunKernelHardWork(float4(1.0f, 1.0f, 1.0f, 1.0f), s, o);
+         }
+         streamWrite(o, outGPU);
+      }
+      t2 = CyclesToUsecs(GetTimeTSC() - t2);
+
+      if (t1 > t2) {
+         printf("%9d   %10d   %8d\t\t\t(* RunKVS %d *)\n",
+                4 * length * length, i,
+                (int) (outGPU[1].x * length * length * i * 4), length);
+         goto done;
+      }
+   }
+
+   if (i == MAX_TRIES) {
+      printf("(* GPU can't catch the CPU in %d iterations at length %d *)\n",
+             MAX_TRIES, length);
+      printf("%9d   %10d   %8d\t\t\t(* RunKVS %d *)\n",
+             4 * length * length, -1, -1, length);
+      i = -1;
+   }
+
+done:
+   free(data);
+   free(outGPU);
+   free(outCPU);
+   return i;
+}
+
+
+/*
+ * RunKernel_GPUvsCPU --
+ *
+ *      Entry point for generating the list of GPU/CPU crossover points as a
+ *      function of length.
+ *
+ */
+
+void
+RunKernel_GPUvsCPU(int minLength)
+{
+   int lastIters = 0, count = 0;
+   int iters, i;
+   float idealSlope;
+
+   RunKernelKickBRT();
+
+   printf("(* RunKernel GPU vs. CPU: min length %d *)\n", minLength);
+   for (i = 0; i < 1; i++) {
+      idealSlope = RunKernelFindIdealGPUvsCPUSlope();
+   }
+
+   printf("(* length   iterations   # of ops *)\n");
+   RunKernelFindGPUvsCPUOne(minLength);
+   for (i = 0; i < numLengths; i++) {
+      if (lengths[i] <= minLength) continue;
+
+      iters = RunKernelFindGPUvsCPUOne(lengths[i]);
+
+      /*
+       * The way we time, we end up determining # iterations i as a function
+       * of stream length beyond which the GPU is faster than the CPU.  The
+       * model predicts this to converge to be linear in length which means
+       * i should become constant.  Once we're satisfied we've hit that
+       * point, there's no reason to calculate any more values (and it's
+       * quadratically expensive to keep going).  --Jeremy.
+       */
+      if (iters > 0 && iters == lastIters) {
+         //if (count++ > 10) { i += (numLengths - i) / 2; count = 0; }
+         if (count++ > 10) { i += 5; count = 0; }
+      } else {
+         count = 0;
+         lastIters = iters;
+      }
+   }
+}

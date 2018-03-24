@@ -1,0 +1,40 @@
+// struct_input.br
+// Tests use of structures for input parameters.
+
+#include <stdio.h>
+
+typedef struct Pair_t {
+  float first;
+  float second;
+} Pair;
+
+kernel void sumPairs( Pair p<>, out float result<> ) {
+  result = p.first + p.second;
+}
+
+int main() {
+  Pair pairs< 100 >;
+  float output< 100 >;
+  Pair pairs_data[100];
+  float output_data[100];
+  int i;
+
+  for( i = 0; i < 100; i++ )
+  {
+    pairs_data[i].first = (float)i;
+    pairs_data[i].second = (float)(i*100);
+  }
+
+  streamRead( pairs, pairs_data );
+  sumPairs( pairs, output );
+  streamWrite( output, output_data );
+	
+	for( i = 0; i < 100; i++ )
+	{
+		printf( "%6.1f ", output_data[i] );
+    if( i % 10 == 9 )
+      printf("\n");
+	}
+	
+	return 0;
+}

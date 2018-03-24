@@ -1,0 +1,116 @@
+// imageproc.br
+// Let's try to do some image processing
+// We are going to apply a 3x3 mask across the image.
+// We use gather, iterators, outstreams
+
+#include <stdio.h>
+#include <stdlib.h>
+
+kernel void process_img( float img[][],  float mask[3][3],
+                 iter float2 it<>, out float o_img<> ) {
+    float2 t0 = float2(-1.0f, -1.0f);
+    float2 t1 = float2(-1.0f, 0.0f);
+    float2 t2 = float2(-1.0f, 1.0f);
+    float2 t3 = float2(0.0f, -1.0f);
+    float2 t4 = float2(0.0f, 0.0f);
+    float2 t5 = float2(0.0f, 1.0f);
+    float2 t6 = float2(1.0f, -1.0f);
+    float2 t7 = float2(1.0f, 0.0f);
+    float2 t8 = float2(1.0f, 1.0f);
+    o_img  = img[it+t0] * mask[t0+1];
+    
+    o_img += img[it+t1] * mask[t1+1];
+    o_img += img[it+t2] * mask[t2+1];
+    o_img += img[it+t3] * mask[t3+1];
+    o_img += img[it+t4] * mask[t4+1];
+    o_img += img[it+t5] * mask[t5+1];
+    o_img += img[it+t6] * mask[t6+1];
+    o_img += img[it+t7] * mask[t7+1];
+    o_img += img[it+t8] * mask[t8+1];
+}
+
+int main(int argc, char* argv[]) {
+    unsigned char* input = NULL;
+    unsigned char* output = NULL;
+    float* outputf = NULL;
+    float* inputf = NULL;
+    float mask[3][3];
+    float mask_stream<3,3>;
+    int i, j;
+    int xsize, ysize;
+    int insize, outsize;
+
+    if(argc < 3){
+	fprintf(stderr, "Usage: %s <x-size> <y-size>\n", argv[0]);
+	exit(1);
+    }
+ 
+    xsize = atoi(argv[1]);
+    ysize = atoi(argv[2]);
+
+    insize = xsize+2;
+    outsize = xsize;
+    if(xsize > 2046 || ysize > 2046){
+	fprintf(stderr, "Only images <= 2046 are supported\n");
+        exit(1);
+    }
+
+    {	
+        iter float2 it<outsize,outsize> = iter( float2(1.0f, 1.0f), float2(insize-1.f, insize-1.f) );
+        float img<insize,insize>;
+        float o_img<outsize,outsize>;
+       
+        input   = (unsigned char*)malloc(insize*insize*sizeof(unsigned char));
+        output  = (unsigned char*)malloc(outsize*outsize*sizeof(unsigned char));
+        inputf  = (float*)malloc(insize*insize*sizeof(float));
+        outputf = (float*)malloc(outsize*outsize*sizeof(float));
+
+        // Lets try a simple shift to the left
+        for(i=0; i<3; i++){
+            for(j=0; j<3; j++){
+                 mask[i][j] = 0.;
+            }
+        }
+        mask[1][0] = 1.;
+ 
+        // Fill the input with random numbers
+        for(i=0; i<insize; i++){
+            for(j=0; j<insize; j++){
+              input[i*insize+j] = i*insize+j;//(unsigned char)rand();
+            }  
+        }
+
+        // convert (pgm) input to float
+        for(i=0; i<insize; i++){
+          for(j=0; j<insize; j++){
+              inputf[i*insize+j] = (float)input[i*insize+j];
+          }
+        }   
+
+        streamRead(img, inputf);
+        streamRead(mask_stream, mask);
+        process_img(img, mask_stream, it, o_img );
+        streamWrite(o_img, outputf);
+
+        // convert output back to bytes for (pgm) output
+        for(i=0; i<outsize; i++){
+            for(j=0; j<outsize; j++){
+                output[i*outsize+j] = (unsigned char)outputf[i*outsize+j];
+            }
+        }
+
+
+        // Let's make sure the values are what we expect
+        for(i=0; i<outsize; i++){
+            for(j=0; j<outsize; j++){
+                if(output[i*outsize+j] != input[(i+1)*insize+(j)]){
+                    fprintf(stderr, "Mismatch - output[%d][%d]: %u, input[%d][%d]: %u\n",
+                            i, j, output[i*outsize+j], i+1, j+1, input[(i+1)*insize+(j)]);
+                }
+            }
+        }   
+    }
+    // TIM: in case it fails silently along the way... :)
+    printf("test complete\n");
+    return 0;
+}

@@ -1,0 +1,311 @@
+// particle_cloth_split.br
+// Stress test for splitting code...
+
+#include <stdio.h>
+#include <math.h>
+
+kernel void getNeighborForce(
+	float3 inPosition<>,
+	float3 inVelocity<>,
+	float3 inPositions[][],
+	float3 inVelocities[][],
+	float2 inIndex<>,
+	float2 inOffset<>,
+	float2 inMaxIndex<>,
+	float inSpringConstant,
+	float inDampingConstant,
+	float inRestLength,
+	out float3 outForce<> )
+{
+	float2 otherIndex = inIndex + inOffset;
+	float2 minIndex;
+	float2 inRange2;
+	float inRange;
+	float3 otherPosition;
+	float3 otherVelocity;
+	float3 relativePosition;
+	float3 relativeVelocity;
+	float length;
+	float3 springAxis;
+	float perturbation;
+	float velocityInSpring;
+	float strength;
+	float3 zero;
+	zero = float3(0,0,0);
+	
+	minIndex = float2(0,0);
+	
+	inRange2 = (otherIndex >= minIndex) && (otherIndex < inMaxIndex);
+	inRange = inRange2.x && inRange2.y;
+	
+	otherPosition = inPositions[ otherIndex ];
+	otherVelocity = inVelocities[ otherIndex ];
+	
+	relativePosition = inPosition - otherPosition;
+	relativeVelocity = inVelocity - otherVelocity;
+
+	length = sqrt( dot( relativePosition, relativePosition ) );
+
+	springAxis = relativePosition / length;
+	perturbation = length - inRestLength;
+
+	velocityInSpring = dot( springAxis, relativeVelocity );
+
+	strength = inSpringConstant*perturbation + inDampingConstant*velocityInSpring;
+	outForce = inRange ? ( strength * springAxis ) : zero;
+}	
+
+kernel void integrateParticles(
+	float3 inPosition<>,
+	float3 inVelocity<>,
+	float inIsStatic<>,
+	float inDeltaTime,
+	float3 inForce,
+	float3 inGravity,
+	out float3 outPosition<>,
+	out float3 outVelocity<> )
+{
+	float3 zero;
+	float3 acceleration;
+	
+	float3 impulse;
+	
+	zero = 0;
+	acceleration = inIsStatic ? zero : ( inForce + inGravity );
+	impulse = inDeltaTime*acceleration;
+	
+	outPosition = inPosition + inDeltaTime*(inVelocity + 0.5*impulse);
+	outVelocity = inVelocity + impulse;
+}
+
+kernel void advanceParticles(
+	iter float2 inIndex<>,
+	float3 inPosition<>,
+	float3 inVelocity<>,
+	float inIsStatic<>,
+	float3 inPositions[][],
+	float3 inVelocities[][],
+	float inDeltaTime,
+	float3 inGravity,
+	out float3 outPosition<>,
+	out float3 outVelocity<> )
+{
+	float3 forceSum;
+	float3 force;
+	
+	forceSum = float3(0,0,0);
+	
+	// sum neighbor forces
+	
+	// direct neighbors
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(-1,0), float2( 1024, 1024 ),
+		0.1, 0.2, 1.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(0,1), float2( 1024, 1024 ),
+		0.1, 0.2, 1.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(1,0), float2( 1024, 1024 ),
+		0.1, 0.2, 1.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(0,-1), float2( 1024, 1024 ),
+		0.1, 0.2, 1.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+	
+	// 2-away neighbors
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(-2,0), float2( 1024, 1024 ),
+		0.01, 0.02, 2.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(0,2), float2( 1024, 1024 ),
+		0.01, 0.02, 2.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(2,0), float2( 1024, 1024 ),
+		0.01, 0.02, 2.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+
+	getNeighborForce( inPosition, inVelocity,
+		inPositions, inVelocities,
+		inIndex, float2(0,-2), float2( 1024, 1024 ),
+		0.01, 0.02, 2.0 / 1024.0,
+		force );
+	forceSum = forceSum + force;
+	
+	// integrate
+	integrateParticles( inPosition, inVelocity, inIsStatic, inDeltaTime, forceSum, inGravity, outPosition, outVelocity );
+}
+
+extern int getTime();
+
+void initializeParticles(
+	int inParticlesPerSide,
+	float3* outPositions,
+	float3* outVelocities,
+	float* outStaticFlags )
+{
+	int x, y;
+	float3* pos;
+	float3* vel;
+	float* stat;
+	float scale;
+
+	scale = 1.0f / (float)(inParticlesPerSide-1);
+
+	pos = outPositions;
+	vel = outVelocities;
+	stat = outStaticFlags;
+	
+	for( y = 0; y < inParticlesPerSide; y++ )
+	{
+		for( x = 0; x < inParticlesPerSide; x++ )
+		{
+			pos->x = scale*((float)x);
+			pos->y = scale*((float)-y);
+			pos->z = 0.0f;
+			
+			pos++;
+			
+			vel->x = 0.0f;
+			vel->y = 0.0f;
+			vel->z = 0.0f;
+			vel++;
+			
+			*stat++ = 0.0f;
+		}
+	}
+
+	// tweak the corners
+	pos = outPositions + 0;
+	vel = outVelocities + 0;
+	stat = outStaticFlags + 0;
+	*pos = float3( 0, 0, 0.1 );
+	*stat = 1.0f;
+
+	pos = outPositions + (inParticlesPerSide-1);
+	vel = outVelocities + (inParticlesPerSide-1);
+	stat = outStaticFlags + (inParticlesPerSide-1);
+	*pos = float3( 1, 0, -0.1 );
+	*stat = 1.0f;
+}
+
+void testParticleCloth( int inSize, int inIterations, int* outTime )
+{
+  int particleCount = inSize*inSize;
+  float floatSize = inSize + 0.0f;
+    
+  float3 particlePositions< inSize, inSize >;
+  float3 oldParticlePositions< inSize, inSize >;
+  float3 particleVelocities< inSize, inSize >;
+  float3 oldParticleVelocities< inSize, inSize >;
+  
+  float particleStaticFlags< inSize, inSize >;
+  iter float2 particleIndex< inSize, inSize> = iter( float2(0,0), float2(floatSize,floatSize) );
+  
+  float directRestLength;
+  float diagonalRestLength;
+  float bendRestLength;
+  float springConstant;
+  float dampingConstant;
+  float bendSpringConstant;
+  float bendDampingConstant;
+  float3 gravity;
+  float2 maxIndex;
+  float3 windDirection;
+  float3 windVelocity;
+  
+  int i;
+//  int j;
+  float3* particlePositions_data;
+  float3* particleVelocities_data;
+  float* particleStaticFlags_data;
+//  FILE* dump;
+int startTime, endTime;
+
+  
+  directRestLength = 1.0f / (float)(inSize-1);
+  diagonalRestLength = directRestLength * (float) sqrt(2.0);
+  bendRestLength = 2.0f * directRestLength;
+  springConstant = 0.0f;
+  dampingConstant = 0.0f;
+  bendSpringConstant = 0.0f;
+  bendDampingConstant = 0.0f;
+  gravity = float3( 0, 0, 0 );
+//  springConstant = -0.5f * (float)(particleCount);
+//  dampingConstant = -0.03f * (float)(particleCount);
+//  bendSpringConstant = -0.1f * (float)(particleCount);
+//  bendDampingConstant = -0.07f * (float)(particleCount);
+//  gravity = float3( 0, -0.1, 0 );
+  maxIndex = float2( (float)(inSize), (float)(inSize) );
+  windDirection = float3( 0, 0, -1 );
+  windVelocity = float3( 0, 0, 0 );
+//  windVelocity = float3( 0, 0, -1.0f );
+
+  // initialize
+  particlePositions_data = (float3*)malloc( inSize*inSize*sizeof(float3) );
+  particleVelocities_data = (float3*)malloc( inSize*inSize*sizeof(float3) );
+  particleStaticFlags_data = (float*)malloc( inSize*inSize*sizeof(float) );
+  initializeParticles( inSize, particlePositions_data, particleVelocities_data, particleStaticFlags_data );
+
+//  dump = fopen("./dump.dump","wb");
+  
+//  fwrite( &inSize, sizeof(inSize), 1, dump );
+
+
+  streamRead( particlePositions, particlePositions_data );
+  streamRead( particleVelocities, particleVelocities_data );
+  streamRead( particleStaticFlags, particleStaticFlags_data );
+
+startTime = getTime();
+
+  for( i = 0; i < inIterations; i++ )
+  {
+	
+	// do the integration :)
+	advanceParticles( particleIndex, particlePositions, particleVelocities,
+		particleStaticFlags, particlePositions, particleVelocities,
+		0.1f, gravity, oldParticlePositions, oldParticleVelocities );
+	
+	streamSwap( particlePositions, oldParticlePositions );
+	streamSwap( particleVelocities, oldParticleVelocities );
+  }
+  
+  streamWrite( particlePositions, particlePositions_data );
+/*  
+  for( i = 0; i < inSize*inSize; i++ )
+  {
+	printf( "<%f %f %f>\n",
+	  particlePositions_data[i].x,
+	  particlePositions_data[i].y,
+	  particlePositions_data[i].z );
+  }
+*/  
+  endTime = getTime();
+  
+  *outTime = endTime - startTime;
+  
+//  fclose( dump );
+}

@@ -1,0 +1,198 @@
+/*
+ * readwrite.br
+ *
+ *      Very simple tests of how long it takes to fill and then read back a
+ *      stream.
+ */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
+
+#include "main.h"
+#include "readwrite.h"
+
+#if 1
+#define CHECK_MISMATCH 1
+#else
+#define CHECK_MISMATCH 0
+#endif
+
+static const int lengths[] = {
+   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+   21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+   40, 41, 42, 43, 44, 45, 46, 48, 49, 50, 61, 62, 63, 64, 65, 66,
+   67, 68, 69, 70, 80, 90, 100, 120, 140, 160, 180, 200, 220, 240, 256,
+   300, 350, 400, 450, 512, 550, 600, 650, 700, 750, 800, 850, 900, 950,
+   1024, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2048
+};
+static const int numLengths = sizeof lengths / sizeof lengths[0];
+
+/*
+ * ReadWriteNOP --
+ *
+ *      We need to touch our streams in order to force the runtime to pull
+ *      them down to the card, so we use the simplest kernel to accomplish
+ *      that.
+ */
+
+kernel void
+ReadWriteNOP(float4 s<>, out float4 o<>)
+{
+   o = s;
+}
+
+
+/*
+ * ReadWriteBuildData --
+ *
+ *      Fill the input and output streams for the memcpy() test.  Input has
+ *      a simple to recognize pattern and output has a value that's
+ *      guaranteed not to appear in the pattern.
+ */
+
+static void
+ReadWriteBuildData(float4 **input, float4 **output, int numEntries)
+{
+   int i;
+
+   *input = (float4 *) malloc(numEntries * sizeof **input);
+   assert(input);
+   *output = (float4 *) malloc(numEntries * sizeof **output);
+   assert(output);
+
+   for (i = 0; i < numEntries; i++) {
+      (*input)[i].x = (float) i;
+      (*input)[i].y = (float) i;
+      (*input)[i].z = (float) i;
+      (*input)[i].w = (float) i;
+      (*output)[i] = float4(-1.0f, -1.0f, -1.0f, -1.0f);
+   }
+}
+
+
+/*
+ * ReadWriteProcessTiming --
+ *
+ *      Calculate the throughput / bandwidth and verify that the kernel
+ *      executed corectly.
+ *
+ *      NOTE: stop and start are both tunnelled as globals
+ */
+
+static void
+ReadWriteProcessTiming(const char *name, float4 *input, float4 *output,
+                       int length, int numEntries)
+{
+   int i, numBytes = numEntries * sizeof *input;
+
+   printf("%9d\t%6d\t\t%6.2f\t\t(* %s *)\n",
+          length, (int) CyclesToUsecs(stop - start),
+          numBytes / (float) CyclesToUsecs(stop - start), name);
+
+   for (i = 0; CHECK_MISMATCH && i < numEntries; i++) {
+      if ((input[i].x != output[i].x &&
+           (output[i].x - input[i].x > 0.1f*input[i].x ||
+            input[i].x - output[i].x > 0.1f*input[i].x)) ||
+          output[i].x != output[i].y ||
+          output[i].x != output[i].z ||
+          output[i].x != output[i].w) {
+         printf("(* Mismatch %d/%d.  In: %f, Out: %f\t\t%s *)\n",
+                 i, numEntries, input[i].x, output[i].x, name);
+         break;
+      }
+   }
+}
+
+
+/*
+ * ReadWrite1D --
+ *
+ *      Measure how fast we can streamRead() and streamWrite() a 1D stream
+ *      of float4's of the specified length.
+ */
+
+static void
+ReadWrite1D(const char *logName, int length)
+{
+   float4 *in, *output;
+   float4 s<length>, o<length>;
+
+   ReadWriteBuildData(&in, &output, length);
+
+   start = GetTimeTSC();
+   streamRead(s, in);
+   ReadWriteNOP(s, o);
+   streamWrite(o, output);
+   stop = GetTimeTSC();
+
+   ReadWriteProcessTiming(logName, in, output, length, length);
+
+   free(in);
+   free(output);
+}
+
+
+/*
+ * ReadWrite2D --
+ *
+ *      Measure how fast we can streamRead() and streamWrite() a 2D stream
+ *      of float4's of the specified length in each dimension.
+ */
+
+static void
+ReadWrite2D(const char *logName, int length)
+{
+   float4 *in, *output;
+   float4 s<length, length>, o<length, length>;
+
+   ReadWriteBuildData(&in, &output, length * length);
+
+   start = GetTimeTSC();
+   streamRead(s, in);
+   ReadWriteNOP(s, o);
+   streamWrite(o, output);
+   stop = GetTimeTSC();
+
+   ReadWriteProcessTiming(logName, in, output, length, length * length);
+
+   free(in);
+   free(output);
+}
+
+
+void
+ReadWrite1D_Time(int maxLength)
+{
+   float4 s<1>, o<1>;
+   int i;
+
+   /* Prevent kernel cold start costs from inflating ReadWrite1D() */
+   ReadWriteNOP(s, o);
+
+   printf("(* ReadWrite1D: max length %d *)\n"
+          "(* length\t usecs\t\tMFloats/sec *)\n", maxLength);
+   for (i = 0; i < numLengths && lengths[i] < maxLength; i++) {
+      ReadWrite1D("RW1D", lengths[i]);
+   }
+   ReadWrite1D("RW1D", maxLength);
+   printf("\n");
+}
+
+
+void
+ReadWrite2D_Time(int maxLength)
+{
+   float4 s<1>, o<1>;
+   int i;
+
+   /* Prevent kernel cold start costs from inflating ReadWrite1D() */
+   ReadWriteNOP(s, o);
+
+   printf("(* ReadWrite2D: max length %d *)\n"
+          "(* length\t usecs\t\tMFloats/sec *)\n", maxLength);
+   for (i = 0; i < numLengths && lengths[i] < maxLength; i++) {
+      ReadWrite2D("RW2D", lengths[i]);
+   }
+   ReadWrite2D("RW2D", maxLength);
+}
